@@ -90,6 +90,7 @@ if st.session_state.runs >= MAX_RUNS_PER_SESSION:
     st.warning(f"This demo allows {MAX_RUNS_PER_SESSION} analyses per session.")
 
 if analyse_clicked:
+    st.session_state.pop("result", None)  # never show an old report next to a new error
     try:
         with st.spinner("Analysing feedback… this usually takes 15–40 seconds."):
             result = analyse(st.session_state.feedback)

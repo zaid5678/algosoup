@@ -13,10 +13,12 @@ from pydantic import ValidationError
 from models import Analysis
 
 DEFAULT_MODEL = "gemini-3.8-flash"
+FALLBACK_MODEL = "gemini-3.6-flash"  # tried once if the primary is overloaded or out of quota
 MIN_CHARS = 40
 MAX_CHARS = 30_000
 MAX_OUTPUT_TOKENS = 16_000
-TIMEOUT_MS = 120_000
+TIMEOUT_MS = 90_000
+RETRY_STATUS_CODES = [408, 500, 502, 503, 504]
 
 SYSTEM_PROMPT = """You are SignalSort, an analyst who turns raw customer feedback \
 (reviews, support tickets, interview notes) into decision-ready insight for a product team.
@@ -135,6 +137,36 @@ _CLIENT_ERRORS = {
 }
 
 
+class CapacityError(AnalysisError):
+    """Overload or quota exhaustion: worth trying another model."""
+
+
+def _analyse_with(client: genai.Client, model: str, text: str) -> Analysis:
+    """One model, with a single retry for replies that fail schema validation."""
+    try:
+        for attempt in range(2):
+            try:
+                return _request(client, model, text)
+            except (ValidationError, ValueError):
+                if attempt == 1:
+                    raise AnalysisError(
+                        "The AI returned an unexpected format twice. Please try again."
+                    ) from None
+    except errors.ClientError as e:
+        message = _CLIENT_ERRORS.get(e.code, f"The AI service rejected the request ({e.code}).")
+        if e.code == 400 and "API key" in str(e):  # Gemini reports bad keys as 400
+            message = _CLIENT_ERRORS[401]
+        if e.code == 429:
+            raise CapacityError(message) from None
+        raise AnalysisError(message) from None
+    except errors.ServerError as e:
+        raise CapacityError(
+            f"The AI service returned an error ({e.code}). Please retry shortly."
+        ) from None
+    except httpx.TransportError:
+        raise AnalysisError("Couldn't reach the AI service. Check your connection and retry.") from None
+
+
 def analyse(text: str, *, api_key: str | None = None, model: str | None = None,
             client: genai.Client | None = None) -> AnalysisResult:
     text = validate_input(text)
@@ -146,30 +178,24 @@ def analyse(text: str, *, api_key: str | None = None, model: str | None = None,
                 "No API key configured. Set GEMINI_API_KEY in your .env file "
                 "(locally) or in the app's secrets (when deployed)."
             )
-        client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=TIMEOUT_MS))
+        client = genai.Client(api_key=api_key, http_options=types.HttpOptions(
+                timeout=TIMEOUT_MS,
+                retry_options=types.HttpRetryOptions(
+                    attempts=3, http_status_codes=RETRY_STATUS_CODES),
+            ),
+        )
 
+    used = model
     try:
-        # One retry covers the rare reply that fails schema validation.
-        for attempt in range(2):
-            try:
-                analysis = _request(client, model, text)
-                break
-            except (ValidationError, ValueError):
-                if attempt == 1:
-                    raise AnalysisError(
-                        "The AI returned an unexpected format twice. Please try again."
-                    ) from None
-    except errors.ClientError as e:
-        message = _CLIENT_ERRORS.get(e.code, f"The AI service rejected the request ({e.code}).")
-        if e.code == 400 and "API key" in str(e):  # Gemini reports bad keys as 400
-            message = _CLIENT_ERRORS[401]
-        raise AnalysisError(message) from None
-    except errors.ServerError as e:
-        raise AnalysisError(
-            f"The AI service returned an error ({e.code}). Please retry shortly."
-        ) from None
-    except httpx.TransportError:
-        raise AnalysisError("Couldn't reach the AI service. Check your connection and retry.") from None
+        analysis = _analyse_with(client, model, text)
+    except CapacityError as first:
+        if model == FALLBACK_MODEL:
+            raise AnalysisError(str(first)) from None
+        try:
+            analysis = _analyse_with(client, FALLBACK_MODEL, text)
+            used = FALLBACK_MODEL
+        except CapacityError:
+            raise AnalysisError(str(first)) from None
 
     analysis, removed = ground_quotes(analysis, text)
-    return AnalysisResult(analysis=analysis, removed_quotes=removed, model=model)
+    return AnalysisResult(analysis=analysis, removed_quotes=removed, model=used)

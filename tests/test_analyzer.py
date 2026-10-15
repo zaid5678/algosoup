@@ -164,7 +164,7 @@ def test_blocks_and_truncation_are_reported():
 ])
 def test_api_errors_become_friendly_messages(error, expected):
     with pytest.raises(AnalysisError, match=expected):
-        analyse(FEEDBACK, client=FakeClient(error))
+        analyse(FEEDBACK, client=FakeClient(error, error))  # second reply: fallback model
 
 
 def test_missing_api_key(monkeypatch):
@@ -189,3 +189,49 @@ def test_exports_contain_report_content():
     rows = list(csv.reader(io.StringIO(to_csv(DEMO_ANALYSIS))))
     assert rows[0][0] == "type"
     assert len(rows) == 1 + len(DEMO_ANALYSIS.themes) + len(DEMO_ANALYSIS.recommendations)
+
+
+def test_csv_neutralises_spreadsheet_formulas():
+    a = DEMO_ANALYSIS.model_copy(deep=True)
+    a.themes[0].quotes = ['=HYPERLINK("http://evil.example","Click")']
+    a.recommendations[0].action = "+cmd|' /C calc'!A0"
+    rows = list(csv.reader(io.StringIO(to_csv(a))))
+    assert rows[1][6].startswith("'=HYPERLINK")
+    assert rows[1 + len(a.themes)][2].startswith("'+cmd")
+
+
+def test_client_is_built_with_retry_for_transient_errors_only(monkeypatch):
+    captured = {}
+
+    class Spy:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.models = FakeClient(ok(VALID))
+
+    monkeypatch.setattr("analyzer.genai.Client", Spy)
+    analyse(FEEDBACK, api_key="test-key")
+    retry = captured["http_options"].retry_options
+    assert retry.attempts == 3
+    assert 503 in retry.http_status_codes and 429 not in retry.http_status_codes
+
+
+def test_capacity_error_falls_back_to_second_model():
+    client = FakeClient(api_error(503), ok(VALID))
+    result = analyse(FEEDBACK, client=client, model="primary-model")
+    assert [c["model"] for c in client.calls] == ["primary-model", "gemini-3.6-flash"]
+    assert result.model == "gemini-3.6-flash"
+
+
+def test_quota_error_falls_back_but_auth_error_does_not():
+    client = FakeClient(api_error(429), ok(VALID))
+    assert analyse(FEEDBACK, client=client, model="primary-model").model == "gemini-3.6-flash"
+    client = FakeClient(api_error(403), ok(VALID))
+    with pytest.raises(AnalysisError, match="key was rejected"):
+        analyse(FEEDBACK, client=client, model="primary-model")
+    assert len(client.calls) == 1
+
+
+def test_both_models_overloaded_reports_first_error():
+    client = FakeClient(api_error(503), api_error(429))
+    with pytest.raises(AnalysisError, match="returned an error \\(503\\)"):
+        analyse(FEEDBACK, client=client, model="primary-model")

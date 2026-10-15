@@ -64,3 +64,12 @@ def test_ai_result_renders_with_provenance(app, monkeypatch):
     assert not at.exception
     assert any("AI analysis complete" in s.value for s in at.success)
     assert any("1 suggested quote(s) were removed" in c.value for c in at.caption)
+
+
+def test_failed_analysis_clears_previous_report(app):
+    button(app, "View example report").click().run()
+    assert "Summary" in [s.value for s in app.subheader]
+    app.text_area[0].set_value("x" * 31_000).run()
+    button(app, "Analyse feedback").click().run()
+    assert any("limit" in e.value for e in app.error)
+    assert [s.value for s in app.subheader] == []

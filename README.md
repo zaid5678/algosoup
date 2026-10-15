@@ -44,6 +44,10 @@ key and make no network calls.
 
 - **Cost:** none, but Google enforces per-minute and per-day request limits. When they're hit
   the app shows a "rate limit or daily quota reached" message.
+- **Reliability:** free-tier models are sometimes overloaded or out of quota. Transient server
+  errors are retried up to 3 times, and if the primary model still fails with a capacity or
+  quota error the app tries `gemini-3.6-flash` once. The report banner names the model that
+  actually produced the analysis.
 - **Privacy:** on the free tier, Google may use submitted content to improve its products.
   The app's footer says so. Switch the key to a paid Gemini plan before analysing real
   customer data.

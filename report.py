@@ -43,6 +43,11 @@ def to_markdown(analysis: Analysis, provenance: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _safe_cell(value: str) -> str:
+    """Stop Excel/Sheets treating customer text as a formula (CSV injection)."""
+    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+
 def to_csv(analysis: Analysis) -> str:
     """One row per theme and one per recommendation, in a single flat table."""
     buf = io.StringIO()
@@ -50,9 +55,9 @@ def to_csv(analysis: Analysis) -> str:
     writer.writerow(["type", "priority", "title", "sentiment", "estimated_prevalence",
                      "detail", "evidence_or_themes"])
     for t in analysis.themes:
-        writer.writerow(["theme", "", t.name, t.sentiment, t.prevalence, t.description,
-                         " | ".join(t.quotes)])
+        writer.writerow(["theme", "", _safe_cell(t.name), t.sentiment, t.prevalence,
+                         _safe_cell(t.description), _safe_cell(" | ".join(t.quotes))])
     for r in analysis.recommendations:
-        writer.writerow(["recommendation", r.priority, r.action, "", "", r.rationale,
-                         " | ".join(r.related_themes)])
+        writer.writerow(["recommendation", r.priority, _safe_cell(r.action), "", "",
+                         _safe_cell(r.rationale), _safe_cell(" | ".join(r.related_themes))])
     return buf.getvalue()
