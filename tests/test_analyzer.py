@@ -3,9 +3,9 @@ import io
 import json
 from types import SimpleNamespace
 
-import anthropic
-import httpx2 as httpx
+import httpx
 import pytest
+from google.genai import errors
 
 from analyzer import AnalysisError, analyse, ground_quotes, is_grounded, normalise, validate_input
 from models import Analysis
@@ -44,25 +44,33 @@ VALID = {
 
 
 class FakeClient:
-    """Stands in for anthropic.Anthropic; returns queued replies or raises queued errors."""
+    """Stands in for genai.Client; returns queued replies or raises queued errors."""
 
     def __init__(self, *replies):
         self.replies = list(replies)
-        self.calls = 0
-        self.messages = self
+        self.calls = []
+        self.models = self
 
-    def create(self, **kwargs):
-        self.calls += 1
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
-        stop_reason, text = reply
-        return SimpleNamespace(stop_reason=stop_reason,
-                               content=[SimpleNamespace(type="text", text=text)])
+        finish_reason, text, block_reason = (*reply, None)[:3]
+        return SimpleNamespace(
+            text=text,
+            candidates=[SimpleNamespace(finish_reason=SimpleNamespace(name=finish_reason))],
+            prompt_feedback=SimpleNamespace(block_reason=block_reason),
+        )
 
 
 def ok(payload):
-    return ("end_turn", json.dumps(payload))
+    return ("STOP", json.dumps(payload))
+
+
+def api_error(code, message="error"):
+    cls = errors.ClientError if code < 500 else errors.ServerError
+    return cls(code, {"error": {"code": code, "message": message, "status": "X"}})
 
 
 # ── Input validation ─────────────────────────────────────────────────────────
@@ -115,50 +123,61 @@ def test_demo_report_quotes_are_all_verbatim_in_sample():
 def test_analyse_success_grounds_quotes():
     client = FakeClient(ok(VALID))
     result = analyse(FEEDBACK, client=client, model="test-model")
+    config = client.calls[0]["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == Analysis.model_json_schema()
+    assert "<feedback>" in client.calls[0]["contents"]
     assert result.removed_quotes == 1
     assert result.model == "test-model"
     assert result.analysis.recommendations[0].priority == "P1"
 
 
 def test_malformed_then_valid_retries_once():
-    client = FakeClient(("end_turn", "not json"), ok(VALID))
+    client = FakeClient(("STOP", "not json"), ok(VALID))
     analyse(FEEDBACK, client=client)
-    assert client.calls == 2
+    assert len(client.calls) == 2
 
 
 def test_malformed_twice_raises():
     bad_schema = {**VALID, "overall_sentiment": "ecstatic"}
-    client = FakeClient(("end_turn", "{oops"), ok(bad_schema))
+    client = FakeClient(("STOP", "{oops"), ok(bad_schema))
     with pytest.raises(AnalysisError, match="unexpected format"):
         analyse(FEEDBACK, client=client)
 
 
-def test_refusal_and_truncation_are_reported():
+def test_blocks_and_truncation_are_reported():
     with pytest.raises(AnalysisError, match="declined"):
-        analyse(FEEDBACK, client=FakeClient(("refusal", "")))
+        analyse(FEEDBACK, client=FakeClient(("SAFETY", None)))
+    with pytest.raises(AnalysisError, match="declined"):
+        analyse(FEEDBACK, client=FakeClient(("STOP", None, "PROHIBITED_CONTENT")))
     with pytest.raises(AnalysisError, match="cut off"):
-        analyse(FEEDBACK, client=FakeClient(("max_tokens", '{"summary": "trunc')))
+        analyse(FEEDBACK, client=FakeClient(("MAX_TOKENS", '{"summary": "trunc')))
 
 
-def test_api_errors_become_friendly_messages():
-    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    with pytest.raises(AnalysisError, match="Couldn't reach"):
-        analyse(FEEDBACK, client=FakeClient(anthropic.APIConnectionError(request=req)))
-    resp = httpx.Response(429, request=req)
-    rate_limited = anthropic.RateLimitError("rate limited", response=resp, body=None)
-    with pytest.raises(AnalysisError, match="Rate limit"):
-        analyse(FEEDBACK, client=FakeClient(rate_limited))
+@pytest.mark.parametrize("error, expected", [
+    (api_error(429, "Resource exhausted"), "free-tier rate limit"),
+    (api_error(400, "API key not valid. Please pass a valid API key."), "key was rejected"),
+    (api_error(403), "key was rejected"),
+    (api_error(404), "model was not found"),
+    (api_error(503), "returned an error \\(503\\)"),
+    (httpx.ConnectError("boom"), "Couldn't reach"),
+])
+def test_api_errors_become_friendly_messages(error, expected):
+    with pytest.raises(AnalysisError, match=expected):
+        analyse(FEEDBACK, client=FakeClient(error))
 
 
 def test_missing_api_key(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(AnalysisError, match="No API key"):
         analyse(FEEDBACK)
 
 
-def test_schema_is_accepted_by_sdk_transform():
-    schema = anthropic.transform_schema(Analysis)
-    assert schema["type"] == "object"
+def test_real_sdk_config_accepts_our_schema():
+    from google.genai import types
+    config = types.GenerateContentConfig(response_mime_type="application/json",
+                                         response_json_schema=Analysis.model_json_schema())
+    assert config.response_json_schema["type"] == "object"
 
 
 # ── Exports ──────────────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
 @pytest.fixture
 def app(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)  # ignore a local .env
     at = AppTest.from_file(APP, default_timeout=30)
     at.run()

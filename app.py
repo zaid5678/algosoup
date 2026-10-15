@@ -20,9 +20,9 @@ PRIORITY_LABELS = {"P1": "Do now", "P2": "Next", "P3": "Later"}
 st.set_page_config(page_title="SignalSort · Customer feedback intelligence", page_icon="📡")
 
 load_dotenv()
-if not os.environ.get("ANTHROPIC_API_KEY"):
+if not os.environ.get("GEMINI_API_KEY"):
     try:  # Streamlit Community Cloud exposes secrets via st.secrets
-        os.environ["ANTHROPIC_API_KEY"] = st.secrets["ANTHROPIC_API_KEY"]
+        os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
     except Exception:
         pass
 
@@ -81,7 +81,7 @@ analyse_clicked = col_go.button(
 
 if not api_key_configured:
     st.info(
-        "AI analysis isn't configured on this server (no `ANTHROPIC_API_KEY`). "
+        "AI analysis isn't configured on this server (no `GEMINI_API_KEY`). "
         "You can still preview a hand-written example report for the sample dataset."
     )
     if st.button("View example report"):
@@ -167,7 +167,8 @@ if result:
 
 st.divider()
 st.caption(
-    "SignalSort sends the text you paste to an AI model for analysis and doesn't store it. "
-    "Don't paste personal or confidential data you aren't permitted to share. "
+    "SignalSort sends the text you paste to Google's Gemini API and doesn't store it. "
+    "This demo uses Gemini's free tier, where Google may use submitted content to improve "
+    "its products, so don't paste personal or confidential data. "
     f"Model: {get_model()}."
 )

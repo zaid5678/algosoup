@@ -5,15 +5,18 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-import anthropic
+import httpx
+from google import genai
+from google.genai import errors, types
 from pydantic import ValidationError
 
 from models import Analysis
 
-DEFAULT_MODEL = "claude-opus-5-5"
+DEFAULT_MODEL = "gemini-3.8-flash"
 MIN_CHARS = 40
 MAX_CHARS = 30_000
-MAX_TOKENS = 16_000
+MAX_OUTPUT_TOKENS = 16_000
+TIMEOUT_MS = 120_000
 
 SYSTEM_PROMPT = """You are SignalSort, an analyst who turns raw customer feedback \
 (reviews, support tickets, interview notes) into decision-ready insight for a product team.
@@ -93,44 +96,57 @@ def ground_quotes(analysis: Analysis, source: str) -> tuple[Analysis, int]:
 
 
 def get_api_key() -> str | None:
-    return os.environ.get("ANTHROPIC_API_KEY") or None
+    return os.environ.get("GEMINI_API_KEY") or None
 
 
 def get_model() -> str:
     return os.environ.get("SIGNALSORT_MODEL") or DEFAULT_MODEL
 
 
-def _request(client: anthropic.Anthropic, model: str, text: str) -> Analysis:
-    response = client.messages.create(
+def _request(client: genai.Client, model: str, text: str) -> Analysis:
+    response = client.models.generate_content(
         model=model,
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"<feedback>\n{text}\n</feedback>"}],
-        output_config={
-            "effort": "medium",
-            "format": {"type": "json_schema", "schema": anthropic.transform_schema(Analysis)},
-        },
+        contents=f"<feedback>\n{text}\n</feedback>",
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_json_schema=Analysis.model_json_schema(),
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+        ),
     )
-    if response.stop_reason == "refusal":
+    feedback = response.prompt_feedback
+    if feedback is not None and feedback.block_reason:
         raise AnalysisError("The model declined to analyse this text. Try different feedback.")
-    if response.stop_reason == "max_tokens":
+    finish = response.candidates[0].finish_reason if response.candidates else None
+    finish = getattr(finish, "name", finish)
+    if finish == "MAX_TOKENS":
         raise AnalysisError("The analysis was cut off. Try a shorter batch of feedback.")
-    raw = next((b.text for b in response.content if b.type == "text"), "")
-    return Analysis.model_validate_json(raw)
+    if finish not in (None, "STOP"):
+        raise AnalysisError("The model declined to analyse this text. Try different feedback.")
+    return Analysis.model_validate_json(response.text or "")
+
+
+_CLIENT_ERRORS = {
+    400: "The request was rejected by the AI service. Try shorter or different feedback.",
+    401: "The API key was rejected. Check GEMINI_API_KEY.",
+    403: "The API key was rejected or lacks access. Check GEMINI_API_KEY.",
+    404: "The configured model was not found. Check SIGNALSORT_MODEL.",
+    429: "The free-tier rate limit or daily quota was reached. Wait a minute and try again.",
+}
 
 
 def analyse(text: str, *, api_key: str | None = None, model: str | None = None,
-            client: anthropic.Anthropic | None = None) -> AnalysisResult:
+            client: genai.Client | None = None) -> AnalysisResult:
     text = validate_input(text)
     model = model or get_model()
     if client is None:
         api_key = api_key or get_api_key()
         if not api_key:
             raise AnalysisError(
-                "No API key configured. Set ANTHROPIC_API_KEY in your .env file "
+                "No API key configured. Set GEMINI_API_KEY in your .env file "
                 "(locally) or in the app's secrets (when deployed)."
             )
-        client = anthropic.Anthropic(api_key=api_key, timeout=120, max_retries=2)
+        client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=TIMEOUT_MS))
 
     try:
         # One retry covers the rare reply that fails schema validation.
@@ -143,22 +159,17 @@ def analyse(text: str, *, api_key: str | None = None, model: str | None = None,
                     raise AnalysisError(
                         "The AI returned an unexpected format twice. Please try again."
                     ) from None
-    except anthropic.AuthenticationError:
-        raise AnalysisError("The API key was rejected. Check ANTHROPIC_API_KEY.") from None
-    except anthropic.PermissionDeniedError:
-        raise AnalysisError("This API key doesn't have access to the configured model.") from None
-    except anthropic.NotFoundError:
-        raise AnalysisError(f"Model '{model}' was not found. Check SIGNALSORT_MODEL.") from None
-    except anthropic.RateLimitError:
-        raise AnalysisError("Rate limit reached. Wait a minute and try again.") from None
-    except anthropic.BadRequestError as e:
-        raise AnalysisError(f"The request was rejected: {e.message}") from None
-    except anthropic.APIConnectionError:
-        raise AnalysisError("Couldn't reach the AI service. Check your connection and retry.") from None
-    except anthropic.APIStatusError as e:
+    except errors.ClientError as e:
+        message = _CLIENT_ERRORS.get(e.code, f"The AI service rejected the request ({e.code}).")
+        if e.code == 400 and "API key" in str(e):  # Gemini reports bad keys as 400
+            message = _CLIENT_ERRORS[401]
+        raise AnalysisError(message) from None
+    except errors.ServerError as e:
         raise AnalysisError(
-            f"The AI service returned an error ({e.status_code}). Please retry shortly."
+            f"The AI service returned an error ({e.code}). Please retry shortly."
         ) from None
+    except httpx.TransportError:
+        raise AnalysisError("Couldn't reach the AI service. Check your connection and retry.") from None
 
     analysis, removed = ground_quotes(analysis, text)
     return AnalysisResult(analysis=analysis, removed_quotes=removed, model=model)

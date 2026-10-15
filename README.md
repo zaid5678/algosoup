@@ -16,7 +16,7 @@ Requires Python 3.11+.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # then set ANTHROPIC_API_KEY
+cp .env.example .env          # then set GEMINI_API_KEY (free: https://aistudio.google.com/apikey)
 streamlit run app.py
 ```
 
@@ -37,21 +37,29 @@ key and make no network calls.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Yes, for live analysis | Read server-side from `.env` locally or from Streamlit secrets when deployed. Never sent to the browser. |
-| `SIGNALSORT_MODEL` | No | Overrides the model (default `claude-opus-5-5`). |
+| `GEMINI_API_KEY` | Yes, for live analysis | Free Google AI Studio key. Read server-side from `.env` locally or from Streamlit secrets when deployed. Never sent to the browser. |
+| `SIGNALSORT_MODEL` | No | Overrides the model (default `gemini-3.8-flash`). |
+
+### Free-tier trade-offs
+
+- **Cost:** none, but Google enforces per-minute and per-day request limits. When they're hit
+  the app shows a "rate limit or daily quota reached" message.
+- **Privacy:** on the free tier, Google may use submitted content to improve its products.
+  The app's footer says so. Switch the key to a paid Gemini plan before analysing real
+  customer data.
 
 ## Deploy (Streamlit Community Cloud)
 
 1. Push this repo to GitHub.
 2. On share.streamlit.io, create an app from the repo with `app.py` as the entry point.
-3. In **Advanced settings → Secrets**, add `ANTHROPIC_API_KEY = "..."`.
-4. Set a monthly spend limit on the API key: the app has no login, and the
+3. In **Advanced settings → Secrets**, add `GEMINI_API_KEY = "..."`.
+4. The app has no login, so anyone with the URL shares your free-tier quota. The
    per-session run cap (10) is only a soft guard.
 
 ## How it works
 
 ```
-app.py (Streamlit UI) → analyzer.analyse() → one Claude call with a JSON schema
+app.py (Streamlit UI) → analyzer.analyse() → one Gemini call with a JSON schema
                                         ↓
                     Pydantic validation (models.py) → quote grounding → UI / export
 ```
