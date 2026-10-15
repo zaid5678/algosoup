@@ -103,6 +103,65 @@ Browser ── pasted text ──▶ Streamlit server (app.py)
 | `samples.py` | Sample dataset (fictional app "Trackly") and the hand-written example report |
 | `tests/` | Unit tests and headless UI tests |
 
+## Technical decisions
+
+### Why Streamlit?
+
+I chose Streamlit because the project had a one-hour implementation and deployment
+constraint. It allowed me to build an interactive Python web application without spending
+significant time on frontend infrastructure or maintaining a separate backend and frontend.
+
+This kept the focus on the core product problem: helping users turn unstructured customer
+feedback into actionable product insights.
+
+The main benefits of this choice were:
+
+- **Rapid development:** Python provides a straightforward way to connect the user interface,
+  analysis logic, and LLM API.
+- **Simple architecture:** The implementation runs as a single application without separate
+  frontend and backend services.
+- **Fast deployment:** Streamlit Community Cloud publishes a working demo directly from a
+  GitHub repository.
+- **Maintainability:** The small codebase is easier to understand, test, and extend within
+  the scope of this MVP.
+
+The trade-off is that Streamlit offers less control over highly customised frontend
+interactions than a dedicated frontend framework. For this product's initial workflow,
+development speed and simplicity were more valuable than extensive UI customisation.
+
+### Model response validation
+
+SignalSort uses an LLM to analyse customer feedback and produce structured insights. Because
+model output is not inherently reliable, the application validates it before presenting it
+to the user:
+
+1. **Input validation:** Empty feedback is rejected, as is feedback shorter than 40 or longer
+   than 30,000 characters, before any API request is made.
+2. **Response structure:** The response must match a Pydantic schema (`models.py`) containing
+   a summary, themes, sentiment labels, evidence quotes, and recommended actions. A reply
+   that fails validation is retried once.
+3. **Type and value checks:** Fields must have the expected types, and categorical values
+   such as sentiment, prevalence and priority must belong to the supported set.
+4. **Evidence grounding:** Verbatim evidence quotes must appear in the submitted feedback.
+   Quotes that don't are removed rather than presented as direct customer quotes.
+5. **Error handling:** API failures, quota limits and malformed responses produce a useful
+   message instead of crashing the application.
+6. **Safe configuration:** API credentials are read from environment variables or the hosting
+   platform's secrets configuration rather than being hardcoded in source code.
+
+These checks improve reliability, but they do not guarantee that every theme or
+recommendation is correct. The analysis remains AI-generated and should be reviewed by the
+user.
+
+### Design philosophy
+
+The goal was to prioritise a complete, usable workflow over unnecessary infrastructure.
+Streamlit reduced implementation overhead, while response validation and explicit error
+handling help address the reliability challenges of LLM-powered applications.
+
+The result is intended as a practical starting point for customer-feedback intelligence, not
+a replacement for human product judgment.
+
 ## Deploy (Streamlit Community Cloud)
 
 1. On https://share.streamlit.io choose **Create app** and pick this repository, branch
@@ -140,20 +199,30 @@ removed by the grounding check. That is a handful of runs on one dataset, not an
 
 - **No accuracy evaluation.** Theme quality, sentiment labels and priorities are model
   judgement and haven't been benchmarked against human labels. Treat output as a draft.
+- **Interpretation quality.** The model may miss subtle themes, misunderstand context, or
+  combine distinct issues into a single theme. Output can also vary between runs.
 - **Grounding checks text, not meaning.** A quote is guaranteed to exist in your input, but
   not guaranteed to be the best evidence for the theme it's attached to.
 - Quote matching ignores case and whitespace, so a displayed quote can differ from the
   source in capitalisation only.
 - Input is capped at 30,000 characters per analysis, with no chunking for larger datasets.
+  Larger inputs would also raise latency and API cost.
 - English-language feedback only has been considered; other languages are untested.
-- Free-tier Gemini has rate limits, can be overloaded, and may use submitted content for
-  product improvement. The shared public quota can run out.
-- No accounts, history, payments or integrations (out of scope for this MVP).
+- **Privacy.** Feedback may contain personal or confidential information. Free-tier Gemini may
+  use submitted content for product improvement, so don't submit sensitive data unless the
+  processing arrangements suit it. The free tier also has rate limits, can be overloaded, and
+  the shared public quota can run out.
+- **No persistence.** Nothing is stored, so results don't survive the browser session. There
+  are also no accounts, payments or integrations (out of scope for this MVP).
 
 ## Future improvements
 
-- Evaluate against a labelled feedback set and tune the prompt and model choice.
+- Evaluate against a representative labelled feedback set and tune the prompt and model choice.
 - Chunk and merge very large datasets; accept CSV/file upload.
 - Count mentions deterministically (e.g. per-item tagging) so frequencies can be exact.
 - Paid-tier key with no training on inputs, plus real rate limiting and authentication.
-- Saved analyses and trend comparison over time.
+- Persistent workspaces: saved analyses and trend comparison over time.
+- Batch uploads and configurable analysis criteria.
+- Integrations with support platforms.
+- Better prioritisation using customer impact.
+- Automated, repeatable evaluation of analysis quality.
